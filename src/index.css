@@ -93,8 +93,3 @@ button:focus-visible {
         height: -webkit-fill-available;
     }
 }
-
-
-/* Рекомендуется в index.html:
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-*/
