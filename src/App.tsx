@@ -7,6 +7,8 @@ import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react'
 import { Worker, Viewer, SpecialZoomLevel } from '@react-pdf-viewer/core'
 import { defaultLayoutPlugin } from '@react-pdf-viewer/default-layout'
 import { searchPlugin } from '@react-pdf-viewer/search'
+import { zoomPlugin } from '@react-pdf-viewer/zoom' // << добавили зум-плагин
+
 import {
     getInlinePdfWorkerUrl,
     revokeInlinePdfWorkerUrl,
@@ -34,14 +36,12 @@ const guessNameFromUrl = (u: string) => {
         return 'document.pdf'
     }
 }
-
 const sanitizeFileName = (name: string) =>
     (name || 'document.pdf').replace(/[\/\\?%*:|"<>]/g, '_').trim()
-
 const ensurePdfExt = (name: string) =>
     /\.(pdf)$/i.test(name) ? name : `${name}.pdf`
 
-// iOS / iPadOS (включая десктопный Safari с тачем)
+// iOS / iPadOS detection (в т.ч. десктопный Safari с тачем)
 const isIosLike = () => {
     const ua = navigator.userAgent || ''
     return (
@@ -50,30 +50,34 @@ const isIosLike = () => {
     )
 }
 
-const App: React.FC = () => {
-    // гарантируем мета-тег один раз
-    useEffect(() => {
-        ensureViewportMeta()
-    }, [])
+const clamp = (v: number, min: number, max: number) =>
+    Math.max(min, Math.min(max, v))
 
+const App: React.FC = () => {
     const [fileUrl, setFileUrl] = useState<string | null>(null)
     const [fileBlob, setFileBlob] = useState<Blob | null>(null)
     const [downloadName, setDownloadName] = useState<string>('document.pdf')
     const inputRef = useRef<HTMLInputElement>(null)
 
-    // share
+    // share state
     const [shareUrl, setShareUrl] = useState<string | null>(null)
     const [shareConfig, setShareConfig] = useState<ShareConfig | null>(null)
 
-    // fullscreen
+    // fullscreen state
     const containerRef = useRef<HTMLDivElement>(null)
     const [isFullscreen, setIsFullscreen] = useState(false) // native FS
     const [cssFullscreen, setCssFullscreen] = useState(false) // CSS fallback FS
 
-    // === search plugin (горячие клавиши включены)
-    const search = searchPlugin({ enableShortcuts: true })
+    // zoom state (для программного пинч-зума)
+    const zoomBaseRef = useRef<number>(1) // базовый масштаб перед жестом
+    const zoomLiveRef = useRef<number>(1) // текущий масштаб
+    const pinchActiveRef = useRef(false)
 
-    // === PDF viewer toolbar
+    // === plugins
+    const search = searchPlugin({ enableShortcuts: true })
+    const zoom = zoomPlugin() // даёт zoomTo(...)
+    const { zoomTo } = zoom
+
     const layout = defaultLayoutPlugin({
         sidebarTabs: (tabs) => [tabs[0]],
         renderToolbar: (Toolbar) => (
@@ -86,7 +90,6 @@ const App: React.FC = () => {
                         Zoom,
                         ZoomIn,
                     } = slots
-
                     return (
                         <div className='flex items-center gap-2 px-2 py-1 border-b bg-white'>
                             <ZoomOut />
@@ -105,9 +108,11 @@ const App: React.FC = () => {
         ),
     })
 
+    // === inline worker
     const workerUrl = useMemo(() => getInlinePdfWorkerUrl(), [])
     useEffect(() => () => revokeInlinePdfWorkerUrl(), [])
 
+    // === безопасное имя для сохранения
     const suggestDownloadName = useCallback(async (): Promise<string> => {
         let name =
             downloadName ||
@@ -127,7 +132,9 @@ const App: React.FC = () => {
                     const raw = decodeURIComponent(m?.[1] || m?.[2] || '')
                     if (raw) name = ensurePdfExt(sanitizeFileName(raw))
                 }
-            } catch {}
+            } catch {
+                /* ignore */
+            }
         }
 
         const typed = window.prompt('Сохранить как (имя файла):', name)
@@ -140,7 +147,6 @@ const App: React.FC = () => {
     const handleDownload = useCallback(async () => {
         const finalName = await suggestDownloadName()
         if (!finalName) return
-
         try {
             let blob = fileBlob
             if (!blob && fileUrl) {
@@ -173,7 +179,7 @@ const App: React.FC = () => {
         }
     }, [fileBlob, fileUrl, suggestDownloadName])
 
-    // sync native fullscreen flag
+    // === sync native fullscreen flag
     useEffect(() => {
         const onFsChange = () => {
             const fsElement =
@@ -204,7 +210,7 @@ const App: React.FC = () => {
         }
     }, [])
 
-    // блокируем прокрутку боди при CSS FS
+    // === lock body scroll while CSS fullscreen active
     useEffect(() => {
         const cls = 'body-no-scroll'
         if (cssFullscreen) document.body.classList.add(cls)
@@ -212,18 +218,16 @@ const App: React.FC = () => {
         return () => document.body.classList.remove(cls)
     }, [cssFullscreen])
 
-    // === fullscreen enter (smart: native -> fallback CSS)
+    // === fullscreen enter (smart: native -> CSS fallback)
     const enterFullscreen = useCallback(async () => {
         const el = containerRef.current
         if (!el) return
         const anyEl = el as any
 
-        // На iOS сразу уходим в CSS-фуллскрин: нативный FS часто недоступен/ограничен
         if (isIosLike()) {
             setCssFullscreen(true)
             return
         }
-
         try {
             if (el.requestFullscreen) await el.requestFullscreen()
             else if (anyEl.webkitRequestFullscreen)
@@ -238,7 +242,6 @@ const App: React.FC = () => {
             setCssFullscreen(true)
         }
     }, [])
-
     const exitFullscreen = useCallback(async () => {
         if (cssFullscreen) {
             setCssFullscreen(false)
@@ -257,24 +260,67 @@ const App: React.FC = () => {
         }
     }, [cssFullscreen])
 
-    // Ctrl+wheel для десктопов
+    // === ПИНЧ-ЗУМ внутри вьюера (iOS gesture events + Ctrl+wheel)
     useEffect(() => {
         const el = containerRef.current
         if (!el) return
+
+        // iOS жесты (нестанд.)
+        const onGestureStart = (e: any) => {
+            // перехватываем, чтобы НЕ зумилась вся страница, а зумился именно ридер
+            e.preventDefault()
+            pinchActiveRef.current = true
+            zoomBaseRef.current = zoomLiveRef.current
+        }
+        const onGestureChange = (e: any) => {
+            e.preventDefault()
+            // e.scale: 1 = базовое расстояние между пальцами
+            const next = clamp(zoomBaseRef.current * (e.scale || 1), 0.5, 5)
+            zoomLiveRef.current = next
+            try {
+                zoomTo(next)
+            } catch {}
+        }
+        const onGestureEnd = (e: any) => {
+            e.preventDefault()
+            pinchActiveRef.current = false
+        }
+
+        // десктоп: Ctrl + колесо -> зум
         const onWheel = (e: WheelEvent) => {
             if (e.ctrlKey) {
                 e.preventDefault()
-                const factor = e.deltaY > 0 ? 0.95 : 1.05
+                const delta = e.deltaY
+                const factor = delta > 0 ? 0.95 : 1.05
                 const next = clamp(zoomLiveRef.current * factor, 0.5, 5)
                 zoomLiveRef.current = next
-                zoomTo(next)
+                try {
+                    zoomTo(next)
+                } catch {}
             }
         }
+
+        // навешиваем
+        el.addEventListener('gesturestart', onGestureStart as any, {
+            passive: false,
+        })
+        el.addEventListener('gesturechange', onGestureChange as any, {
+            passive: false,
+        })
+        el.addEventListener('gestureend', onGestureEnd as any, {
+            passive: false,
+        })
         el.addEventListener('wheel', onWheel, { passive: false })
-        return () => el.removeEventListener('wheel', onWheel)
+
+        return () => {
+            el.removeEventListener('gesturestart', onGestureStart as any)
+            el.removeEventListener('gesturechange', onGestureChange as any)
+            el.removeEventListener('gestureend', onGestureEnd as any)
+            el.removeEventListener('wheel', onWheel)
+        }
     }, [zoomTo])
 
-    // iOS высоты, ре-лайаут
+    // === iOS orientation/resize nudge to recalc layout
     useEffect(() => {
         const fix = () => {
             if (containerRef.current) {
@@ -293,7 +339,7 @@ const App: React.FC = () => {
         }
     }, [])
 
-    // === postMessage приём
+    // === postMessage приём (без изменений)
     useEffect(() => {
         const initialFromAttrs = readShareConfigFromIframeAttrs()
         if (initialFromAttrs)
@@ -384,7 +430,7 @@ const App: React.FC = () => {
         return () => window.removeEventListener('message', onMsg)
     }, [])
 
-    // local loader
+    // === локальный загрузчик
     const pick = () => inputRef.current?.click()
     const onChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const f = e.target.files?.[0]
@@ -400,6 +446,7 @@ const App: React.FC = () => {
         })
     }
 
+    // === share click
     const handleShare = useCallback(async () => {
         try {
             let url = shareUrl
@@ -421,24 +468,23 @@ const App: React.FC = () => {
         }
     }, [shareUrl, shareConfig])
 
-    const ios = isIosLike()
-
     return (
         <div
             ref={containerRef}
             className={`relative ${cssFullscreen ? 'fullscreen-css' : ''}`}
-            style={{
-                width: '100vw',
-                height: '100dvh',
-                // Ключевой момент: для Android даём полный контроль над gesture через Pointer Events
-                // (не даём странице забирать пинч). На iOS оставляем 'manipulation', чтобы не ломать жесты Safari.
-                touchAction: ios ? 'manipulation' : 'none',
-            }}
+            style={{ width: '100vw', height: '100dvh' }}
         >
             <div
-                className='pointer-events-auto absolute right-2 top-2 z-50 flex flex-col items-center gap-1 p-1 rounded-xl bg-white/65 backdrop-blur shadow-sm'
+                className='
+                    pointer-events-auto
+                    absolute right-2 top-2 z-50
+                    flex flex-col items-center gap-1
+                    p-1
+                    rounded-xl
+                    bg-white/65 backdrop-blur
+                    shadow-sm
+                '
                 style={{
-                    // чтобы кнопки не упирались в "чёлку"/индикатор iOS
                     paddingTop: 'calc(env(safe-area-inset-top, 0) + 8px)',
                 }}
             >
@@ -515,7 +561,7 @@ const App: React.FC = () => {
                 <Worker workerUrl={workerUrl}>
                     <Viewer
                         fileUrl={fileUrl}
-                        plugins={[search, layout]} // порядок важен: search -> layout
+                        plugins={[search, layout, zoom]} // << важна вставка zoom-плагина
                         defaultScale={SpecialZoomLevel.PageWidth}
                     />
                 </Worker>
