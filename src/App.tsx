@@ -41,7 +41,7 @@ const sanitizeFileName = (name: string) =>
 const ensurePdfExt = (name: string) =>
     /\.(pdf)$/i.test(name) ? name : `${name}.pdf`
 
-// iOS / iPadOS detection (в т.ч. десктопный Safari с тачем)
+// iOS / iPadOS (включая десктопный Safari с тачем)
 const isIosLike = () => {
     const ua = navigator.userAgent || ''
     return (
@@ -51,16 +51,21 @@ const isIosLike = () => {
 }
 
 const App: React.FC = () => {
+    // гарантируем мета-тег один раз
+    useEffect(() => {
+        ensureViewportMeta()
+    }, [])
+
     const [fileUrl, setFileUrl] = useState<string | null>(null)
     const [fileBlob, setFileBlob] = useState<Blob | null>(null)
     const [downloadName, setDownloadName] = useState<string>('document.pdf')
     const inputRef = useRef<HTMLInputElement>(null)
 
-    // share state
+    // share
     const [shareUrl, setShareUrl] = useState<string | null>(null)
     const [shareConfig, setShareConfig] = useState<ShareConfig | null>(null)
 
-    // fullscreen state
+    // fullscreen
     const containerRef = useRef<HTMLDivElement>(null)
     const [isFullscreen, setIsFullscreen] = useState(false) // native FS
     const [cssFullscreen, setCssFullscreen] = useState(false) // CSS fallback FS
@@ -100,11 +105,9 @@ const App: React.FC = () => {
         ),
     })
 
-    // === inline worker
     const workerUrl = useMemo(() => getInlinePdfWorkerUrl(), [])
     useEffect(() => () => revokeInlinePdfWorkerUrl(), [])
 
-    // === безопасное имя для сохранения
     const suggestDownloadName = useCallback(async (): Promise<string> => {
         let name =
             downloadName ||
@@ -124,9 +127,7 @@ const App: React.FC = () => {
                     const raw = decodeURIComponent(m?.[1] || m?.[2] || '')
                     if (raw) name = ensurePdfExt(sanitizeFileName(raw))
                 }
-            } catch {
-                /* ignore */
-            }
+            } catch {}
         }
 
         const typed = window.prompt('Сохранить как (имя файла):', name)
@@ -172,7 +173,7 @@ const App: React.FC = () => {
         }
     }, [fileBlob, fileUrl, suggestDownloadName])
 
-    // === sync native fullscreen flag
+    // sync native fullscreen flag
     useEffect(() => {
         const onFsChange = () => {
             const fsElement =
@@ -203,7 +204,7 @@ const App: React.FC = () => {
         }
     }, [])
 
-    // === lock body scroll while CSS fullscreen active
+    // блокируем прокрутку боди при CSS FS
     useEffect(() => {
         const cls = 'body-no-scroll'
         if (cssFullscreen) document.body.classList.add(cls)
@@ -256,7 +257,24 @@ const App: React.FC = () => {
         }
     }, [cssFullscreen])
 
-    // === iOS orientation/resize nudge to recalc layout
+    // Ctrl+wheel для десктопов
+    useEffect(() => {
+        const el = containerRef.current
+        if (!el) return
+        const onWheel = (e: WheelEvent) => {
+            if (e.ctrlKey) {
+                e.preventDefault()
+                const factor = e.deltaY > 0 ? 0.95 : 1.05
+                const next = clamp(zoomLiveRef.current * factor, 0.5, 5)
+                zoomLiveRef.current = next
+                zoomTo(next)
+            }
+        }
+        el.addEventListener('wheel', onWheel, { passive: false })
+        return () => el.removeEventListener('wheel', onWheel)
+    }, [zoomTo])
+
+    // iOS высоты, ре-лайаут
     useEffect(() => {
         const fix = () => {
             if (containerRef.current) {
@@ -366,7 +384,7 @@ const App: React.FC = () => {
         return () => window.removeEventListener('message', onMsg)
     }, [])
 
-    // === локальный загрузчик
+    // local loader
     const pick = () => inputRef.current?.click()
     const onChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const f = e.target.files?.[0]
@@ -382,7 +400,6 @@ const App: React.FC = () => {
         })
     }
 
-    // === share click
     const handleShare = useCallback(async () => {
         try {
             let url = shareUrl
@@ -404,22 +421,22 @@ const App: React.FC = () => {
         }
     }, [shareUrl, shareConfig])
 
+    const ios = isIosLike()
+
     return (
         <div
             ref={containerRef}
             className={`relative ${cssFullscreen ? 'fullscreen-css' : ''}`}
-            style={{ width: '100vw', height: '100dvh' }}
+            style={{
+                width: '100vw',
+                height: '100dvh',
+                // Ключевой момент: для Android даём полный контроль над gesture через Pointer Events
+                // (не даём странице забирать пинч). На iOS оставляем 'manipulation', чтобы не ломать жесты Safari.
+                touchAction: ios ? 'manipulation' : 'none',
+            }}
         >
             <div
-                className='
-                    pointer-events-auto
-                    absolute right-2 top-2 z-50
-                    flex flex-col items-center gap-1
-                    p-1
-                    rounded-xl
-                    bg-white/65 backdrop-blur
-                    shadow-sm
-                '
+                className='pointer-events-auto absolute right-2 top-2 z-50 flex flex-col items-center gap-1 p-1 rounded-xl bg-white/65 backdrop-blur shadow-sm'
                 style={{
                     // чтобы кнопки не упирались в "чёлку"/индикатор iOS
                     paddingTop: 'calc(env(safe-area-inset-top, 0) + 8px)',
