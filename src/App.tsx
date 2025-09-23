@@ -7,7 +7,7 @@ import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react'
 import { Worker, Viewer, SpecialZoomLevel } from '@react-pdf-viewer/core'
 import { defaultLayoutPlugin } from '@react-pdf-viewer/default-layout'
 import { searchPlugin } from '@react-pdf-viewer/search'
-import { zoomPlugin } from '@react-pdf-viewer/zoom' // << добавили зум-плагин
+import { zoomPlugin } from '@react-pdf-viewer/zoom'
 
 import {
     getInlinePdfWorkerUrl,
@@ -41,7 +41,7 @@ const sanitizeFileName = (name: string) =>
 const ensurePdfExt = (name: string) =>
     /\.(pdf)$/i.test(name) ? name : `${name}.pdf`
 
-// iOS / iPadOS detection (в т.ч. десктопный Safari с тачем)
+// iOS / iPadOS (включая десктопный Safari с тачем)
 const isIosLike = () => {
     const ua = navigator.userAgent || ''
     return (
@@ -53,29 +53,48 @@ const isIosLike = () => {
 const clamp = (v: number, min: number, max: number) =>
     Math.max(min, Math.min(max, v))
 
+// Опционально: вставим meta viewport, если его нет (можно убрать, если правишь index.html)
+const ensureViewportMeta = () => {
+    if (document.querySelector('meta[name="viewport"]')) return
+    const m = document.createElement('meta')
+    m.name = 'viewport'
+    // user-scalable=no — чтобы Android не забирал жесты, когда работаем внутренним пинчом
+    m.content =
+        'width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no'
+    document.head.appendChild(m)
+}
+
 const App: React.FC = () => {
+    // гарантируем мета-тег один раз
+    useEffect(() => {
+        ensureViewportMeta()
+    }, [])
+
     const [fileUrl, setFileUrl] = useState<string | null>(null)
     const [fileBlob, setFileBlob] = useState<Blob | null>(null)
     const [downloadName, setDownloadName] = useState<string>('document.pdf')
     const inputRef = useRef<HTMLInputElement>(null)
 
-    // share state
+    // share
     const [shareUrl, setShareUrl] = useState<string | null>(null)
     const [shareConfig, setShareConfig] = useState<ShareConfig | null>(null)
 
-    // fullscreen state
+    // fullscreen
     const containerRef = useRef<HTMLDivElement>(null)
     const [isFullscreen, setIsFullscreen] = useState(false) // native FS
     const [cssFullscreen, setCssFullscreen] = useState(false) // CSS fallback FS
 
-    // zoom state (для программного пинч-зума)
-    const zoomBaseRef = useRef<number>(1) // базовый масштаб перед жестом
-    const zoomLiveRef = useRef<number>(1) // текущий масштаб
-    const pinchActiveRef = useRef(false)
+    // zoom state (для программного пинча)
+    const zoomBaseRef = useRef<number>(1)
+    const zoomLiveRef = useRef<number>(1)
 
-    // === plugins
+    // два активных поинтера для Android пинча
+    const pointers = useRef<Map<number, { x: number; y: number }>>(new Map())
+    const pinchStartDistRef = useRef<number | null>(null)
+
+    // plugins
     const search = searchPlugin({ enableShortcuts: true })
-    const zoom = zoomPlugin() // даёт zoomTo(...)
+    const zoom = zoomPlugin()
     const { zoomTo } = zoom
 
     const layout = defaultLayoutPlugin({
@@ -108,11 +127,9 @@ const App: React.FC = () => {
         ),
     })
 
-    // === inline worker
     const workerUrl = useMemo(() => getInlinePdfWorkerUrl(), [])
     useEffect(() => () => revokeInlinePdfWorkerUrl(), [])
 
-    // === безопасное имя для сохранения
     const suggestDownloadName = useCallback(async (): Promise<string> => {
         let name =
             downloadName ||
@@ -132,9 +149,7 @@ const App: React.FC = () => {
                     const raw = decodeURIComponent(m?.[1] || m?.[2] || '')
                     if (raw) name = ensurePdfExt(sanitizeFileName(raw))
                 }
-            } catch {
-                /* ignore */
-            }
+            } catch {}
         }
 
         const typed = window.prompt('Сохранить как (имя файла):', name)
@@ -179,7 +194,7 @@ const App: React.FC = () => {
         }
     }, [fileBlob, fileUrl, suggestDownloadName])
 
-    // === sync native fullscreen flag
+    // sync native fullscreen flag
     useEffect(() => {
         const onFsChange = () => {
             const fsElement =
@@ -210,7 +225,7 @@ const App: React.FC = () => {
         }
     }, [])
 
-    // === lock body scroll while CSS fullscreen active
+    // блокируем прокрутку боди при CSS FS
     useEffect(() => {
         const cls = 'body-no-scroll'
         if (cssFullscreen) document.body.classList.add(cls)
@@ -218,12 +233,11 @@ const App: React.FC = () => {
         return () => document.body.classList.remove(cls)
     }, [cssFullscreen])
 
-    // === fullscreen enter (smart: native -> CSS fallback)
+    // fullscreen enter (native -> CSS fallback)
     const enterFullscreen = useCallback(async () => {
         const el = containerRef.current
         if (!el) return
         const anyEl = el as any
-
         if (isIosLike()) {
             setCssFullscreen(true)
             return
@@ -260,47 +274,27 @@ const App: React.FC = () => {
         }
     }, [cssFullscreen])
 
-    // === ПИНЧ-ЗУМ внутри вьюера (iOS gesture events + Ctrl+wheel)
+    // === ПИНЧ-ЗУМ ===
+    // iOS — через gesture* (как раньше)
     useEffect(() => {
+        if (!isIosLike()) return
         const el = containerRef.current
         if (!el) return
 
-        // iOS жесты (нестанд.)
         const onGestureStart = (e: any) => {
-            // перехватываем, чтобы НЕ зумилась вся страница, а зумился именно ридер
             e.preventDefault()
-            pinchActiveRef.current = true
             zoomBaseRef.current = zoomLiveRef.current
         }
         const onGestureChange = (e: any) => {
             e.preventDefault()
-            // e.scale: 1 = базовое расстояние между пальцами
             const next = clamp(zoomBaseRef.current * (e.scale || 1), 0.5, 5)
             zoomLiveRef.current = next
-            try {
-                zoomTo(next)
-            } catch {}
+            zoomTo(next)
         }
         const onGestureEnd = (e: any) => {
             e.preventDefault()
-            pinchActiveRef.current = false
         }
 
-        // десктоп: Ctrl + колесо -> зум
-        const onWheel = (e: WheelEvent) => {
-            if (e.ctrlKey) {
-                e.preventDefault()
-                const delta = e.deltaY
-                const factor = delta > 0 ? 0.95 : 1.05
-                const next = clamp(zoomLiveRef.current * factor, 0.5, 5)
-                zoomLiveRef.current = next
-                try {
-                    zoomTo(next)
-                } catch {}
-            }
-        }
-
-        // навешиваем
         el.addEventListener('gesturestart', onGestureStart as any, {
             passive: false,
         })
@@ -310,17 +304,91 @@ const App: React.FC = () => {
         el.addEventListener('gestureend', onGestureEnd as any, {
             passive: false,
         })
-        el.addEventListener('wheel', onWheel, { passive: false })
 
         return () => {
             el.removeEventListener('gesturestart', onGestureStart as any)
             el.removeEventListener('gesturechange', onGestureChange as any)
             el.removeEventListener('gestureend', onGestureEnd as any)
-            el.removeEventListener('wheel', onWheel)
         }
     }, [zoomTo])
 
-    // === iOS orientation/resize nudge to recalc layout
+    // Android/другие — через Pointer Events (двумя пальцами)
+    useEffect(() => {
+        if (isIosLike()) return
+        const root = containerRef.current
+        if (!root || !('onpointerdown' in window)) return
+
+        const dist = (
+            a: { x: number; y: number },
+            b: { x: number; y: number }
+        ) => Math.hypot(a.x - b.x, a.y - b.y)
+
+        const onPointerDown = (e: PointerEvent) => {
+            // перехватываем жесты страниц, чтобы зум был внутри PDF
+            ;(e.target as Element)?.setPointerCapture?.(e.pointerId)
+            pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+            if (pointers.current.size === 2) {
+                const [p1, p2] = Array.from(pointers.current.values())
+                pinchStartDistRef.current = dist(p1, p2)
+                zoomBaseRef.current = zoomLiveRef.current
+            }
+        }
+        const onPointerMove = (e: PointerEvent) => {
+            if (!pointers.current.has(e.pointerId)) return
+            pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+
+            if (pointers.current.size === 2 && pinchStartDistRef.current) {
+                e.preventDefault()
+                const [p1, p2] = Array.from(pointers.current.values())
+                const curDist = dist(p1, p2)
+                if (curDist > 0) {
+                    const scale = curDist / pinchStartDistRef.current
+                    const next = clamp(zoomBaseRef.current * scale, 0.5, 5)
+                    zoomLiveRef.current = next
+                    zoomTo(next)
+                }
+            }
+        }
+        const endPointer = (e: PointerEvent) => {
+            pointers.current.delete(e.pointerId)
+            if (pointers.current.size < 2) {
+                pinchStartDistRef.current = null
+            }
+        }
+
+        root.addEventListener('pointerdown', onPointerDown, { passive: false })
+        root.addEventListener('pointermove', onPointerMove, { passive: false })
+        root.addEventListener('pointerup', endPointer)
+        root.addEventListener('pointercancel', endPointer)
+        root.addEventListener('pointerleave', endPointer)
+
+        return () => {
+            root.removeEventListener('pointerdown', onPointerDown)
+            root.removeEventListener('pointermove', onPointerMove)
+            root.removeEventListener('pointerup', endPointer)
+            root.removeEventListener('pointercancel', endPointer)
+            root.removeEventListener('pointerleave', endPointer)
+        }
+    }, [zoomTo])
+
+    // Ctrl+wheel для десктопов
+    useEffect(() => {
+        const el = containerRef.current
+        if (!el) return
+        const onWheel = (e: WheelEvent) => {
+            if (e.ctrlKey) {
+                e.preventDefault()
+                const factor = e.deltaY > 0 ? 0.95 : 1.05
+                const next = clamp(zoomLiveRef.current * factor, 0.5, 5)
+                zoomLiveRef.current = next
+                zoomTo(next)
+            }
+        }
+        el.addEventListener('wheel', onWheel, { passive: false })
+        return () => el.removeEventListener('wheel', onWheel)
+    }, [zoomTo])
+
+    // iOS высоты, ре-лайаут
     useEffect(() => {
         const fix = () => {
             if (containerRef.current) {
@@ -339,7 +407,7 @@ const App: React.FC = () => {
         }
     }, [])
 
-    // === postMessage приём (без изменений)
+    // postMessage (как было)
     useEffect(() => {
         const initialFromAttrs = readShareConfigFromIframeAttrs()
         if (initialFromAttrs)
@@ -430,7 +498,7 @@ const App: React.FC = () => {
         return () => window.removeEventListener('message', onMsg)
     }, [])
 
-    // === локальный загрузчик
+    // local loader
     const pick = () => inputRef.current?.click()
     const onChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const f = e.target.files?.[0]
@@ -446,7 +514,6 @@ const App: React.FC = () => {
         })
     }
 
-    // === share click
     const handleShare = useCallback(async () => {
         try {
             let url = shareUrl
@@ -468,22 +535,22 @@ const App: React.FC = () => {
         }
     }, [shareUrl, shareConfig])
 
+    const ios = isIosLike()
+
     return (
         <div
             ref={containerRef}
             className={`relative ${cssFullscreen ? 'fullscreen-css' : ''}`}
-            style={{ width: '100vw', height: '100dvh' }}
+            style={{
+                width: '100vw',
+                height: '100dvh',
+                // Ключевой момент: для Android даём полный контроль над gesture через Pointer Events
+                // (не даём странице забирать пинч). На iOS оставляем 'manipulation', чтобы не ломать жесты Safari.
+                touchAction: ios ? 'manipulation' : 'none',
+            }}
         >
             <div
-                className='
-                    pointer-events-auto
-                    absolute right-2 top-2 z-50
-                    flex flex-col items-center gap-1
-                    p-1
-                    rounded-xl
-                    bg-white/65 backdrop-blur
-                    shadow-sm
-                '
+                className='pointer-events-auto absolute right-2 top-2 z-50 flex flex-col items-center gap-1 p-1 rounded-xl bg-white/65 backdrop-blur shadow-sm'
                 style={{
                     paddingTop: 'calc(env(safe-area-inset-top, 0) + 8px)',
                 }}
@@ -561,7 +628,7 @@ const App: React.FC = () => {
                 <Worker workerUrl={workerUrl}>
                     <Viewer
                         fileUrl={fileUrl}
-                        plugins={[search, layout, zoom]} // << важна вставка zoom-плагина
+                        plugins={[search, layout, zoom]}
                         defaultScale={SpecialZoomLevel.PageWidth}
                     />
                 </Worker>
