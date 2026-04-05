@@ -1,69 +1,40 @@
 # React + TypeScript + Vite
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+📄 Simple PDF Viewer (React + TypeScript)
 
-Currently, two official plugins are available:
+Лёгкий standalone/viewer для PDF на базе react-pdf-viewer
+Работает прямо в браузере без сервера — один HTML/JS-бандл можно встроить куда угодно (iframe, CMS, сайт).
+Возможности
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+Открытие PDF с компьютера (drag & drop или через кнопку)
 
-## Expanding the ESLint configuration
+Загрузка PDF в iframe через postMessage (pdf-url, pdf-bytes, pdf-blob, clear-pdf)
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+Поиск по документу
 
-```js
-export default tseslint.config([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+Масштабирование (zoom in/out, pinch-zoom для iOS)
 
-      // Remove tseslint.configs.recommended and replace with this
-      ...tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      ...tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      ...tseslint.configs.stylisticTypeChecked,
+Переход по страницам
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+Скачивание с выбором имени
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Поделиться ссылкой (share-link / share-config)
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Полный экран (нативный и CSS fallback)
 
-export default tseslint.config([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+iOS-friendly (поддержка жестов и корректная работа fullscreen)
+Использование
+
+Соберите проект → получите один index.html с вшитым воркером.
+
+Вставьте в любую страницу через iframe:
+```<iframe src="/pdf-viewer/index.html" width="100%" height="600"></iframe>```
+Либо просто откройте index.html в браузере — работает автономно.
+Подходит для
+
+Встраивания PDF-читалки в любое приложение (Next.js, Django, WordPress, etc.)
+
+Простого шаринга документов без установки ПО
+
+Использования оффлайн (просто открыть локальный index.html)
+П.С. Внутри есть уникальные вещи не нужные вам, но это и так чисто для себя опубликовано, однако вещь полезная.
