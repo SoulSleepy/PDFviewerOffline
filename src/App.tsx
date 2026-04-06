@@ -1,3 +1,5 @@
+'use client'
+
 import '@react-pdf-viewer/core/lib/styles/index.css'
 import '@react-pdf-viewer/default-layout/lib/styles/index.css'
 
@@ -17,6 +19,7 @@ const guessNameFromUrl = (u: string) => {
     try {
         const { pathname } = new URL(u, window.location.href)
         const last = pathname.split('/').filter(Boolean).pop() || 'document.pdf'
+
         return decodeURIComponent(last.endsWith('.pdf') ? last : `${last}.pdf`)
     } catch {
         return 'document.pdf'
@@ -31,6 +34,7 @@ const ensurePdfExt = (name: string) =>
 
 const isIosLike = () => {
     const ua = navigator.userAgent || ''
+
     return (
         /iPad|iPhone|iPod/.test(ua) ||
         (ua.includes('Mac') && 'ontouchend' in document)
@@ -52,17 +56,18 @@ const App: React.FC = () => {
     const [fileUrl, setFileUrl] = useState<string | null>(null)
     const [fileBlob, setFileBlob] = useState<Blob | null>(null)
     const [downloadName, setDownloadName] = useState<string>('document.pdf')
-    const inputRef = useRef<HTMLInputElement>(null)
-
-    const containerRef = useRef<HTMLDivElement>(null)
     const [isFullscreen, setIsFullscreen] = useState(false)
     const [cssFullscreen, setCssFullscreen] = useState(false)
+
+    const inputRef = useRef<HTMLInputElement>(null)
+    const containerRef = useRef<HTMLDivElement>(null)
+    const viewerHostRef = useRef<HTMLDivElement>(null)
 
     const zoomBaseRef = useRef<number>(1)
     const zoomLiveRef = useRef<number>(1)
     const zoomTargetRef = useRef<number>(1)
     const zoomRafRef = useRef<number | null>(null)
-    const viewerHostRef = useRef<HTMLDivElement>(null)
+
     const isDraggingRef = useRef(false)
     const dragStateRef = useRef({
         startX: 0,
@@ -107,17 +112,23 @@ const App: React.FC = () => {
         ),
     })
 
-    const getScrollContainer = useCallback((): HTMLElement | null => {
-    const host = viewerHostRef.current
-    if (!host) return null
-
-    return (host.querySelector('[data-testid="core__inner-pages"]') ||
-        host.querySelector('.rpv-core__inner-pages') ||
-        host.querySelector('.rpv-core__viewer') ||
-        host.firstElementChild) as HTMLElement | null
-}, [])
-
     const workerUrl = useMemo(() => getInlinePdfWorkerUrl(), [])
+
+    const getScrollContainer = useCallback((): HTMLElement | null => {
+        const host = viewerHostRef.current
+        if (!host) return null
+
+        return (host.querySelector('[data-testid="core__inner-pages"]') ||
+            host.querySelector('.rpv-core__inner-pages') ||
+            host.querySelector('.rpv-core__viewer') ||
+            host.firstElementChild) as HTMLElement | null
+    }, [])
+
+    const revokeBlobUrlIfNeeded = useCallback((url: string | null) => {
+        if (url?.startsWith('blob:')) {
+            URL.revokeObjectURL(url)
+        }
+    }, [])
 
     useEffect(() => {
         return () => {
@@ -127,159 +138,13 @@ const App: React.FC = () => {
                 cancelAnimationFrame(zoomRafRef.current)
             }
         }
-    }, [workerUrl])
+    }, [])
 
     useEffect(() => {
-        const host = viewerHostRef.current
-        if (!host) return
-
-        const getInteractiveTarget = (target: EventTarget | null) => {
-            if (!(target instanceof HTMLElement)) return null
-
-            return target.closest(
-                'input, textarea, button, select, a, [role="button"], .rpv-default-layout__toolbar, .rpv-core__button',
-            )
-        }
-
-        const onMouseDown = (e: MouseEvent) => {
-            if (e.button !== 0) return
-            if (getInteractiveTarget(e.target)) return
-
-            const scroller = getScrollContainer()
-            if (!scroller) return
-
-            const canPanX = scroller.scrollWidth > scroller.clientWidth
-            const canPanY = scroller.scrollHeight > scroller.clientHeight
-
-            if (!canPanX && !canPanY) return
-
-            isDraggingRef.current = true
-            dragStateRef.current = {
-                startX: e.clientX,
-                startY: e.clientY,
-                startScrollLeft: scroller.scrollLeft,
-                startScrollTop: scroller.scrollTop,
-            }
-
-            host.style.cursor = 'grabbing'
-            document.body.style.userSelect = 'none'
-        }
-
-        const onMouseMove = (e: MouseEvent) => {
-            if (!isDraggingRef.current) return
-
-            const scroller = getScrollContainer()
-            if (!scroller) return
-
-            const dx = e.clientX - dragStateRef.current.startX
-            const dy = e.clientY - dragStateRef.current.startY
-
-            scroller.scrollLeft = dragStateRef.current.startScrollLeft - dx
-            scroller.scrollTop = dragStateRef.current.startScrollTop - dy
-        }
-
-        const stopDragging = () => {
-            if (!isDraggingRef.current) return
-
-            isDraggingRef.current = false
-            document.body.style.userSelect = ''
-        }
-
-        host.addEventListener('mousedown', onMouseDown)
-        window.addEventListener('mousemove', onMouseMove)
-        window.addEventListener('mouseup', stopDragging)
-        window.addEventListener('mouseleave', stopDragging)
-
         return () => {
-            host.removeEventListener('mousedown', onMouseDown)
-            window.removeEventListener('mousemove', onMouseMove)
-            window.removeEventListener('mouseup', stopDragging)
-            window.removeEventListener('mouseleave', stopDragging)
-
-            document.body.style.userSelect = ''
+            revokeBlobUrlIfNeeded(fileUrl)
         }
-    }, [getScrollContainer, fileUrl])
-
-    const suggestDownloadName = useCallback(async (): Promise<string> => {
-        let name =
-            downloadName ||
-            ((fileBlob as (Blob & { name?: string }) | null)?.name ??
-                undefined) ||
-            (fileUrl ? guessNameFromUrl(fileUrl) : 'document.pdf')
-
-        name = ensurePdfExt(sanitizeFileName(name))
-
-        if (!fileBlob && fileUrl && !fileUrl.startsWith('blob:')) {
-            try {
-                const res = await fetch(fileUrl, { method: 'HEAD' })
-                const cd = res.headers.get('content-disposition')
-
-                if (cd) {
-                    const match =
-                        /filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i.exec(
-                            cd,
-                        )
-                    const raw = decodeURIComponent(
-                        match?.[1] || match?.[2] || '',
-                    )
-
-                    if (raw) {
-                        name = ensurePdfExt(sanitizeFileName(raw))
-                    }
-                }
-            } catch {}
-        }
-
-        const typed = window.prompt('Сохранить как (имя файла):', name)
-        if (!typed) return ''
-
-        const finalName = ensurePdfExt(sanitizeFileName(typed))
-        setDownloadName(finalName)
-
-        return finalName
-    }, [downloadName, fileBlob, fileUrl])
-
-    const handleDownload = useCallback(async () => {
-        const finalName = await suggestDownloadName()
-        if (!finalName) return
-
-        try {
-            let blob = fileBlob
-
-            if (!blob && fileUrl) {
-                const res = await fetch(fileUrl)
-                blob = await res.blob()
-            }
-
-            if (blob) {
-                const a = document.createElement('a')
-                const tmp = URL.createObjectURL(blob)
-
-                a.href = tmp
-                a.download = finalName
-                a.click()
-
-                URL.revokeObjectURL(tmp)
-                return
-            }
-
-            if (fileUrl) {
-                const a = document.createElement('a')
-                a.href = fileUrl
-                a.download = finalName
-                a.click()
-            }
-        } catch (e) {
-            console.error('[download] error:', e)
-
-            if (fileUrl) {
-                const a = document.createElement('a')
-                a.href = fileUrl
-                a.download = finalName
-                a.click()
-            }
-        }
-    }, [fileBlob, fileUrl, suggestDownloadName])
+    }, [fileUrl, revokeBlobUrlIfNeeded])
 
     useEffect(() => {
         const onFsChange = () => {
@@ -335,7 +200,9 @@ const App: React.FC = () => {
             document.body.classList.remove(cls)
         }
 
-        return () => document.body.classList.remove(cls)
+        return () => {
+            document.body.classList.remove(cls)
+        }
     }, [cssFullscreen])
 
     useEffect(() => {
@@ -346,12 +213,95 @@ const App: React.FC = () => {
                 const state = data.payload || {}
                 setCssFullscreen(!!state.css)
                 setIsFullscreen(!!state.native)
+                return
+            }
+
+            if (data.type === 'pdf-url' && typeof data.payload === 'string') {
+                const name =
+                    typeof data.name === 'string'
+                        ? data.name
+                        : guessNameFromUrl(data.payload)
+
+                setDownloadName(ensurePdfExt(sanitizeFileName(name)))
+                setFileBlob(null)
+
+                setFileUrl((prev) => {
+                    revokeBlobUrlIfNeeded(prev)
+                    return data.payload
+                })
+
+                return
+            }
+
+            if (data.type === 'pdf-bytes') {
+                const payload = data.payload
+
+                if (
+                    payload instanceof ArrayBuffer ||
+                    (payload && typeof payload.buffer === 'object')
+                ) {
+                    const ab: ArrayBuffer =
+                        payload instanceof ArrayBuffer
+                            ? payload
+                            : payload.buffer
+
+                    const blob = new Blob([ab], { type: 'application/pdf' })
+                    const name =
+                        typeof data.name === 'string'
+                            ? data.name
+                            : 'document.pdf'
+                    const url = URL.createObjectURL(blob)
+
+                    setDownloadName(ensurePdfExt(sanitizeFileName(name)))
+                    setFileBlob(blob)
+
+                    setFileUrl((prev) => {
+                        revokeBlobUrlIfNeeded(prev)
+                        return url
+                    })
+                }
+
+                return
+            }
+
+            if (data.type === 'pdf-blob' && data.payload) {
+                const blob = data.payload as Blob
+                const name =
+                    typeof data.name === 'string'
+                        ? data.name
+                        : ((blob as Blob & { name?: string }).name ??
+                          'document.pdf')
+                const url = URL.createObjectURL(blob)
+
+                setDownloadName(ensurePdfExt(sanitizeFileName(name)))
+                setFileBlob(blob)
+
+                setFileUrl((prev) => {
+                    revokeBlobUrlIfNeeded(prev)
+                    return url
+                })
+
+                return
+            }
+
+            if (data.type === 'clear-pdf') {
+                setDownloadName('document.pdf')
+                setFileBlob(null)
+
+                setFileUrl((prev) => {
+                    revokeBlobUrlIfNeeded(prev)
+                    return null
+                })
             }
         }
 
         window.addEventListener('message', onMsg)
-        return () => window.removeEventListener('message', onMsg)
-    }, [])
+        window.parent?.postMessage({ type: 'viewer-ready' }, '*')
+
+        return () => {
+            window.removeEventListener('message', onMsg)
+        }
+    }, [revokeBlobUrlIfNeeded])
 
     const enterFullscreen = useCallback(async () => {
         const el = containerRef.current
@@ -369,14 +319,17 @@ const App: React.FC = () => {
         }
 
         try {
-            if (el.requestFullscreen) await el.requestFullscreen()
-            else if (target.webkitRequestFullscreen)
+            if (el.requestFullscreen) {
+                await el.requestFullscreen()
+            } else if (target.webkitRequestFullscreen) {
                 await target.webkitRequestFullscreen()
-            else if (target.mozRequestFullScreen)
+            } else if (target.mozRequestFullScreen) {
                 await target.mozRequestFullScreen()
-            else if (target.msRequestFullscreen)
+            } else if (target.msRequestFullscreen) {
                 await target.msRequestFullscreen()
-            else setCssFullscreen(true)
+            } else {
+                setCssFullscreen(true)
+            }
         } catch {
             setCssFullscreen(true)
         }
@@ -400,12 +353,126 @@ const App: React.FC = () => {
         }
 
         try {
-            if (document.exitFullscreen) await document.exitFullscreen()
-            else if (doc.webkitExitFullscreen) await doc.webkitExitFullscreen()
-            else if (doc.mozCancelFullScreen) await doc.mozCancelFullScreen()
-            else if (doc.msExitFullscreen) await doc.msExitFullscreen()
+            if (document.exitFullscreen) {
+                await document.exitFullscreen()
+            } else if (doc.webkitExitFullscreen) {
+                await doc.webkitExitFullscreen()
+            } else if (doc.mozCancelFullScreen) {
+                await doc.mozCancelFullScreen()
+            } else if (doc.msExitFullscreen) {
+                await doc.msExitFullscreen()
+            }
         } catch {}
     }, [cssFullscreen])
+
+    useEffect(() => {
+        const el = containerRef.current
+        if (!el) return
+
+        const onWheel = (e: WheelEvent) => {
+            if (!e.ctrlKey) return
+
+            e.preventDefault()
+
+            const delta = -e.deltaY
+            const step = delta > 0 ? 1.02 : 0.98
+            const next = clamp(zoomLiveRef.current * step, 0.5, 5)
+
+            zoomLiveRef.current = next
+            zoomTargetRef.current = next
+
+            try {
+                zoomTo(next)
+            } catch {}
+        }
+
+        el.addEventListener('wheel', onWheel, { passive: false })
+
+        return () => {
+            el.removeEventListener('wheel', onWheel)
+        }
+    }, [zoomTo])
+
+    useEffect(() => {
+        const host = viewerHostRef.current
+        if (!host) return
+
+        const getInteractiveTarget = (target: EventTarget | null) => {
+            if (!(target instanceof HTMLElement)) return null
+
+            return target.closest(
+                'input, textarea, button, select, a, [role="button"], .rpv-default-layout__toolbar, .rpv-core__button',
+            )
+        }
+
+        const updateCursor = () => {
+            host.style.cursor = isDraggingRef.current ? 'grabbing' : ''
+        }
+
+        const onMouseDown = (e: MouseEvent) => {
+            if (e.button !== 0) return
+            if (getInteractiveTarget(e.target)) return
+
+            const scroller = getScrollContainer()
+            if (!scroller) return
+
+            const canPanX = scroller.scrollWidth > scroller.clientWidth
+            const canPanY = scroller.scrollHeight > scroller.clientHeight
+
+            if (!canPanX && !canPanY) return
+
+            isDraggingRef.current = true
+            dragStateRef.current = {
+                startX: e.clientX,
+                startY: e.clientY,
+                startScrollLeft: scroller.scrollLeft,
+                startScrollTop: scroller.scrollTop,
+            }
+
+            updateCursor()
+            document.body.style.userSelect = 'none'
+        }
+
+        const onMouseMove = (e: MouseEvent) => {
+            if (!isDraggingRef.current) return
+
+            const scroller = getScrollContainer()
+            if (!scroller) return
+
+            const dx = e.clientX - dragStateRef.current.startX
+            const dy = e.clientY - dragStateRef.current.startY
+
+            scroller.scrollLeft = dragStateRef.current.startScrollLeft - dx
+            scroller.scrollTop = dragStateRef.current.startScrollTop - dy
+        }
+
+        const stopDragging = () => {
+            if (isDraggingRef.current) {
+                isDraggingRef.current = false
+                document.body.style.userSelect = ''
+            }
+
+            updateCursor()
+        }
+
+        host.addEventListener('mousedown', onMouseDown)
+        window.addEventListener('mousemove', onMouseMove)
+        window.addEventListener('mouseup', stopDragging)
+        window.addEventListener('mouseleave', stopDragging)
+        window.addEventListener('blur', stopDragging)
+
+        return () => {
+            host.removeEventListener('mousedown', onMouseDown)
+            window.removeEventListener('mousemove', onMouseMove)
+            window.removeEventListener('mouseup', stopDragging)
+            window.removeEventListener('mouseleave', stopDragging)
+            window.removeEventListener('blur', stopDragging)
+
+            document.body.style.userSelect = ''
+            host.style.cursor = ''
+            isDraggingRef.current = false
+        }
+    }, [getScrollContainer, fileUrl])
 
     useEffect(() => {
         const el = containerRef.current
@@ -425,9 +492,11 @@ const App: React.FC = () => {
 
             if (Math.abs(diff) < 0.01) {
                 zoomLiveRef.current = target
+
                 try {
                     zoomTo(target)
                 } catch {}
+
                 zoomRafRef.current = null
                 return
             }
@@ -512,98 +581,90 @@ const App: React.FC = () => {
         }
     }, [])
 
-    useEffect(() => {
-        const onMsg = (e: MessageEvent) => {
-            const data = e.data || {}
+    const suggestDownloadName = useCallback(async (): Promise<string> => {
+        let name =
+            downloadName ||
+            ((fileBlob as (Blob & { name?: string }) | null)?.name ??
+                undefined) ||
+            (fileUrl ? guessNameFromUrl(fileUrl) : 'document.pdf')
 
-            if (data.type === 'pdf-url' && typeof data.payload === 'string') {
-                const name =
-                    typeof data.name === 'string'
-                        ? data.name
-                        : guessNameFromUrl(data.payload)
+        name = ensurePdfExt(sanitizeFileName(name))
 
-                setDownloadName(ensurePdfExt(sanitizeFileName(name)))
-                setFileBlob(null)
+        if (!fileBlob && fileUrl && !fileUrl.startsWith('blob:')) {
+            try {
+                const res = await fetch(fileUrl, { method: 'HEAD' })
+                const cd = res.headers.get('content-disposition')
 
-                setFileUrl((prev) => {
-                    if (prev?.startsWith('blob:')) {
-                        URL.revokeObjectURL(prev)
+                if (cd) {
+                    const match =
+                        /filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i.exec(
+                            cd,
+                        )
+                    const raw = decodeURIComponent(
+                        match?.[1] || match?.[2] || '',
+                    )
+
+                    if (raw) {
+                        name = ensurePdfExt(sanitizeFileName(raw))
                     }
-                    return data.payload
-                })
-            }
-
-            if (data.type === 'pdf-bytes') {
-                const payload = data.payload
-
-                if (
-                    payload instanceof ArrayBuffer ||
-                    (payload && typeof payload.buffer === 'object')
-                ) {
-                    const ab: ArrayBuffer =
-                        payload instanceof ArrayBuffer
-                            ? payload
-                            : payload.buffer
-
-                    const blob = new Blob([ab], { type: 'application/pdf' })
-                    const name =
-                        typeof data.name === 'string'
-                            ? data.name
-                            : 'document.pdf'
-                    const url = URL.createObjectURL(blob)
-
-                    setDownloadName(ensurePdfExt(sanitizeFileName(name)))
-                    setFileBlob(blob)
-
-                    setFileUrl((prev) => {
-                        if (prev?.startsWith('blob:')) {
-                            URL.revokeObjectURL(prev)
-                        }
-                        return url
-                    })
                 }
-            }
-
-            if (data.type === 'pdf-blob' && data.payload) {
-                const blob = data.payload as Blob
-                const name =
-                    typeof data.name === 'string'
-                        ? data.name
-                        : ((blob as Blob & { name?: string }).name ??
-                          'document.pdf')
-                const url = URL.createObjectURL(blob)
-
-                setDownloadName(ensurePdfExt(sanitizeFileName(name)))
-                setFileBlob(blob)
-
-                setFileUrl((prev) => {
-                    if (prev?.startsWith('blob:')) {
-                        URL.revokeObjectURL(prev)
-                    }
-                    return url
-                })
-            }
-
-            if (data.type === 'clear-pdf') {
-                setDownloadName('document.pdf')
-                setFileBlob(null)
-
-                setFileUrl((prev) => {
-                    if (prev?.startsWith('blob:')) {
-                        URL.revokeObjectURL(prev)
-                    }
-                    return null
-                })
-            }
+            } catch {}
         }
 
-        window.addEventListener('message', onMsg)
-        window.parent?.postMessage({ type: 'viewer-ready' }, '*')
+        const typed = window.prompt('Сохранить как (имя файла):', name)
+        if (!typed) return ''
 
-        return () => window.removeEventListener('message', onMsg)
-    }, [])
+        const finalName = ensurePdfExt(sanitizeFileName(typed))
+        setDownloadName(finalName)
 
-    const pick = () => inputRef.current?.click()
+        return finalName
+    }, [downloadName, fileBlob, fileUrl])
+
+    const handleDownload = useCallback(async () => {
+        const finalName = await suggestDownloadName()
+        if (!finalName) return
+
+        try {
+            let blob = fileBlob
+
+            if (!blob && fileUrl) {
+                const res = await fetch(fileUrl)
+                blob = await res.blob()
+            }
+
+            if (blob) {
+                const a = document.createElement('a')
+                const tmp = URL.createObjectURL(blob)
+
+                a.href = tmp
+                a.download = finalName
+                a.click()
+
+                URL.revokeObjectURL(tmp)
+                return
+            }
+
+            if (fileUrl) {
+                const a = document.createElement('a')
+                a.href = fileUrl
+                a.download = finalName
+                a.click()
+            }
+        } catch (e) {
+            console.error('[download] error:', e)
+
+            if (fileUrl) {
+                const a = document.createElement('a')
+                a.href = fileUrl
+                a.download = finalName
+                a.click()
+            }
+        }
+    }, [fileBlob, fileUrl, suggestDownloadName])
+
+    const pick = () => {
+        inputRef.current?.click()
+    }
 
     const onChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0]
@@ -617,37 +678,38 @@ const App: React.FC = () => {
         setFileBlob(file)
 
         setFileUrl((prev) => {
-            if (prev?.startsWith('blob:')) {
-                URL.revokeObjectURL(prev)
-            }
+            revokeBlobUrlIfNeeded(prev)
             return url
         })
     }
 
     const applyInternalCssFs = cssFullscreen && !inIframe()
 
-    const BtnStyle =
+    const btnStyle =
         'flex items-center justify-center rounded-xl bg-white p-1 outline outline-1 outline-[#4C56AF0F] transition duration-200 ease-in-out hover:bg-[#4C56AF0F]'
 
     return (
         <div
             ref={containerRef}
-            className={`relative ${applyInternalCssFs ? 'fullscreen-css' : ''}`}
+            className={
+                applyInternalCssFs ? 'relative fullscreen-css' : 'relative'
+            }
             style={{ width: '100vw', height: '100dvh' }}
         >
             <div
                 className='pointer-events-auto absolute right-2 top-2 z-50 flex flex-col items-center gap-1 rounded-xl bg-[#4c56af2c]/65 p-1 backdrop-blur'
                 style={{
-                    paddingTop: 'calc(env(safe-area-inset-top, 0) + 4px)',
+                    paddingTop: 'calc(env(safe-area-inset-top, 0px) + 4px)',
                 }}
             >
                 <button
+                    type='button'
                     onClick={() =>
                         cssFullscreen || isFullscreen
-                            ? exitFullscreen()
-                            : enterFullscreen()
+                            ? void exitFullscreen()
+                            : void enterFullscreen()
                     }
-                    className={BtnStyle}
+                    className={btnStyle}
                     title={
                         cssFullscreen || isFullscreen
                             ? 'Выйти из полноэкранного'
@@ -655,17 +717,19 @@ const App: React.FC = () => {
                     }
                 >
                     {cssFullscreen || isFullscreen ? (
-                        <ShrinkScreenIcon fill={'#636c72'} />
+                        <ShrinkScreenIcon fill='#636c72' />
                     ) : (
-                        <FullScreenIcon fill={'#636c72'} />
+                        <FullScreenIcon fill='#636c72' />
                     )}
                 </button>
+
                 <button
-                    onClick={handleDownload}
-                    className={BtnStyle}
+                    type='button'
+                    onClick={() => void handleDownload()}
+                    className={btnStyle}
                     title={`Скачать: ${downloadName}`}
                 >
-                    <DownloadIcon fill={'#636c72'} />
+                    <DownloadIcon fill='#636c72' />
                 </button>
             </div>
 
@@ -679,8 +743,9 @@ const App: React.FC = () => {
                     }}
                 >
                     <button
+                        type='button'
                         onClick={pick}
-                        className='rounded-xl border px-4 py-2 shadow-sm text-[#636c72] border-none outline-1 outline-[#4c56af2c]'
+                        className='rounded-xl border px-4 py-2 text-[#636c72] shadow-sm border-none outline-1 outline-[#4c56af2c]'
                     >
                         Открыть PDF
                     </button>
@@ -699,10 +764,7 @@ const App: React.FC = () => {
                 </div>
             ) : (
                 <Worker workerUrl={workerUrl}>
-                    <div
-                        ref={viewerHostRef}
-                        className='h-full w-full'
-                    >
+                    <div ref={viewerHostRef} className='h-full w-full'>
                         <Viewer
                             fileUrl={fileUrl}
                             plugins={[layout, zoom]}
