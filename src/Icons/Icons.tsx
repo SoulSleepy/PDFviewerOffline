@@ -60,3 +60,38 @@ export const ShrinkScreenIcon = ({ fill = 'white' }) => {
         </IconWrapper>
     )
 }
+
+export const RotatePageIcon = ({ fill = 'white' }) => {
+    return (
+        <IconWrapper width={24} height={24} fill='none'>
+            <path
+                d='M19.5 12C19.5 15.31 16.81 18 13.5 18H8.75'
+                stroke={fill}
+                strokeWidth='1.8'
+                strokeLinecap='round'
+                strokeLinejoin='round'
+            />
+            <path
+                d='M10.75 15.75L8.5 18L10.75 20.25'
+                stroke={fill}
+                strokeWidth='1.8'
+                strokeLinecap='round'
+                strokeLinejoin='round'
+            />
+            <path
+                d='M4.5 12C4.5 8.69 7.19 6 10.5 6H15.25'
+                stroke={fill}
+                strokeWidth='1.8'
+                strokeLinecap='round'
+                strokeLinejoin='round'
+            />
+            <path
+                d='M13.25 3.75L15.5 6L13.25 8.25'
+                stroke={fill}
+                strokeWidth='1.8'
+                strokeLinecap='round'
+                strokeLinejoin='round'
+            />
+        </IconWrapper>
+    )
+}

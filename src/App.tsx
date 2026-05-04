@@ -13,7 +13,12 @@ import {
     revokeInlinePdfWorkerUrl,
 } from './helpers/pdf-worker-inline'
 
-import { DownloadIcon, FullScreenIcon, ShrinkScreenIcon } from './Icons/Icons'
+import {
+    DownloadIcon,
+    FullScreenIcon,
+    RotatePageIcon,
+    ShrinkScreenIcon,
+} from './Icons/Icons'
 
 const guessNameFromUrl = (u: string) => {
     try {
@@ -75,6 +80,7 @@ const App: React.FC = () => {
         startScrollLeft: 0,
         startScrollTop: 0,
     })
+    const pageRotationsRef = useRef(new Map<number, number>())
 
     const zoom = zoomPlugin()
     const { zoomTo } = zoom
@@ -122,6 +128,145 @@ const App: React.FC = () => {
             host.querySelector('.rpv-core__inner-pages') ||
             host.querySelector('.rpv-core__viewer') ||
             host.firstElementChild) as HTMLElement | null
+    }, [])
+
+    const getPageLayers = useCallback((): HTMLElement[] => {
+        const host = viewerHostRef.current
+        if (!host) return []
+
+        const pages = Array.from(
+            host.querySelectorAll<HTMLElement>(
+                '[data-testid^="core__page-layer-"]',
+            ),
+        )
+
+        return pages.length
+            ? pages
+            : Array.from(
+                  host.querySelectorAll<HTMLElement>('.rpv-core__page-layer'),
+              )
+    }, [])
+
+    const getPageIndex = useCallback((page: HTMLElement, fallback: number) => {
+        const testId = page.getAttribute('data-testid') || ''
+        const match = testId.match(/(\d+)$/)
+
+        return match ? Number(match[1]) : fallback
+    }, [])
+
+    const getCurrentPage = useCallback(() => {
+        const pages = getPageLayers()
+        const scroller = getScrollContainer()
+        const viewport = scroller?.getBoundingClientRect()
+
+        if (!pages.length || !viewport) return null
+
+        let current: {
+            index: number
+            page: HTMLElement
+        } | null = null
+        let bestVisibleArea = 0
+
+        for (const [index, page] of pages.entries()) {
+            const rect = page.getBoundingClientRect()
+            const visibleWidth = Math.max(
+                0,
+                Math.min(rect.right, viewport.right) -
+                    Math.max(rect.left, viewport.left),
+            )
+            const visibleHeight = Math.max(
+                0,
+                Math.min(rect.bottom, viewport.bottom) -
+                    Math.max(rect.top, viewport.top),
+            )
+            const visibleArea = visibleWidth * visibleHeight
+
+            if (visibleArea > bestVisibleArea) {
+                bestVisibleArea = visibleArea
+                current = {
+                    index: getPageIndex(page, index),
+                    page,
+                }
+            }
+        }
+
+        return current
+    }, [getPageIndex, getPageLayers, getScrollContainer])
+
+    const ensurePageRotationInner = useCallback((page: HTMLElement) => {
+        const directInner = Array.from(page.children).find((child) =>
+            child.classList.contains('adcm-page-rotation-inner'),
+        ) as HTMLElement | undefined
+
+        if (directInner) return directInner
+
+        const inner = document.createElement('div')
+        inner.className = 'adcm-page-rotation-inner'
+
+        while (page.firstChild) {
+            inner.appendChild(page.firstChild)
+        }
+
+        page.appendChild(inner)
+
+        return inner
+    }, [])
+
+    const applyPageRotation = useCallback(
+        (page: HTMLElement, degree: number) => {
+            const inner = ensurePageRotationInner(page)
+            const normalized = ((degree % 360) + 360) % 360
+
+            if (!page.dataset.adcmOriginalWidth) {
+                page.dataset.adcmOriginalWidth = `${page.offsetWidth}`
+                page.dataset.adcmOriginalHeight = `${page.offsetHeight}`
+            }
+
+            const width = Number(page.dataset.adcmOriginalWidth)
+            const height = Number(page.dataset.adcmOriginalHeight)
+            const isSideways = normalized === 90 || normalized === 270
+
+            page.style.position = 'relative'
+            page.style.width = `${isSideways ? height : width}px`
+            page.style.height = `${isSideways ? width : height}px`
+            page.style.overflow = 'visible'
+
+            inner.style.position = 'absolute'
+            inner.style.left = '50%'
+            inner.style.top = '50%'
+            inner.style.width = `${width}px`
+            inner.style.height = `${height}px`
+            inner.style.transform = `translate(-50%, -50%) rotate(${normalized}deg)`
+            inner.style.transformOrigin = 'center center'
+            inner.style.transition = 'transform 160ms ease-in-out'
+        },
+        [ensurePageRotationInner],
+    )
+
+    const applyStoredPageRotations = useCallback(() => {
+        getPageLayers().forEach((page, index) => {
+            const pageIndex = getPageIndex(page, index)
+            const rotation = pageRotationsRef.current.get(pageIndex)
+
+            if (rotation) {
+                applyPageRotation(page, rotation)
+            }
+        })
+    }, [applyPageRotation, getPageIndex, getPageLayers])
+
+    const rotateCurrentPage = useCallback(() => {
+        const current = getCurrentPage()
+        if (!current) return
+
+        const next =
+            ((pageRotationsRef.current.get(current.index) || 0) + 90) % 360
+
+        pageRotationsRef.current.set(current.index, next)
+        applyPageRotation(current.page, next)
+    }, [applyPageRotation, getCurrentPage])
+
+    const resetPageRotations = useCallback(() => {
+        pageRotationsRef.current.clear()
     }, [])
 
     const revokeBlobUrlIfNeeded = useCallback((url: string | null) => {
@@ -217,6 +362,8 @@ const App: React.FC = () => {
             }
 
             if (data.type === 'pdf-url' && typeof data.payload === 'string') {
+                resetPageRotations()
+
                 const name =
                     typeof data.name === 'string'
                         ? data.name
@@ -234,6 +381,8 @@ const App: React.FC = () => {
             }
 
             if (data.type === 'pdf-bytes') {
+                resetPageRotations()
+
                 const payload = data.payload
 
                 if (
@@ -265,6 +414,8 @@ const App: React.FC = () => {
             }
 
             if (data.type === 'pdf-blob' && data.payload) {
+                resetPageRotations()
+
                 const blob = data.payload as Blob
                 const name =
                     typeof data.name === 'string'
@@ -285,6 +436,8 @@ const App: React.FC = () => {
             }
 
             if (data.type === 'clear-pdf') {
+                resetPageRotations()
+
                 setDownloadName('document.pdf')
                 setFileBlob(null)
 
@@ -301,7 +454,7 @@ const App: React.FC = () => {
         return () => {
             window.removeEventListener('message', onMsg)
         }
-    }, [revokeBlobUrlIfNeeded])
+    }, [resetPageRotations, revokeBlobUrlIfNeeded])
 
     const enterFullscreen = useCallback(async () => {
         const el = containerRef.current
@@ -473,6 +626,26 @@ const App: React.FC = () => {
             isDraggingRef.current = false
         }
     }, [getScrollContainer, fileUrl])
+
+    useEffect(() => {
+        const host = viewerHostRef.current
+        if (!host || !fileUrl) return
+
+        const observer = new MutationObserver(() => {
+            applyStoredPageRotations()
+        })
+
+        observer.observe(host, {
+            childList: true,
+            subtree: true,
+        })
+
+        applyStoredPageRotations()
+
+        return () => {
+            observer.disconnect()
+        }
+    }, [applyStoredPageRotations, fileUrl])
 
     useEffect(() => {
         const el = containerRef.current
@@ -730,6 +903,16 @@ const App: React.FC = () => {
                     title={`Скачать: ${downloadName}`}
                 >
                     <DownloadIcon fill='#636c72' />
+                </button>
+
+                <button
+                    type='button'
+                    onClick={rotateCurrentPage}
+                    className={btnStyle}
+                    title='Повернуть текущую страницу'
+                    aria-label='Повернуть текущую страницу'
+                >
+                    <RotatePageIcon fill='#636c72' />
                 </button>
             </div>
 
